@@ -9,6 +9,8 @@ import tempfile
 from typing import Optional
 import logging
 from pathlib import Path
+import sys
+import traceback
 
 # Import our main agent
 from main import DocumentQAAgent, logger
@@ -20,6 +22,23 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
+# --- Helper to avoid infinite rerun loops ---
+def request_rerun_once():
+    """
+    Request a Streamlit rerun only once per session to avoid infinite rerun
+    loops that can cause the Streamlit platform to redact the original error.
+    """
+    # Use a dedicated session_state flag to ensure a single explicit rerun.
+    if not st.session_state.get("_rerun_requested", False):
+        st.session_state["_rerun_requested"] = True
+        # experimental_rerun is intentionally still used here because it's the
+        # standard way to trigger a rerun; we just guard it with a session flag.
+        try:
+            st.experimental_rerun()
+        except Exception as e:
+            # If rerun itself raises, surface useful diagnostics
+            print("st.experimental_rerun() failed:", e, file=sys.stderr)
 
 # Custom CSS for better UI
 st.markdown("""
@@ -86,6 +105,9 @@ def initialize_agent(api_key: str) -> bool:
         st.session_state.initialized = True
         return True
     except Exception as e:
+        # Log full traceback to stderr (visible in Streamlit logs)
+        tb = traceback.format_exc()
+        print("Failed to initialize agent:\n", tb, file=sys.stderr)
         st.error(f"Failed to initialize agent: {str(e)}")
         return False
 
@@ -102,6 +124,7 @@ def save_uploaded_file(uploaded_file) -> Optional[str]:
         return file_path
     except Exception as e:
         st.error(f"Error saving file: {str(e)}")
+        print("Error saving file:", traceback.format_exc(), file=sys.stderr)
         return None
 
 def display_document_info(doc_data: dict, doc_id: str):
@@ -146,7 +169,8 @@ def main():
                 with st.spinner("Initializing AI Agent..."):
                     if initialize_agent(api_key):
                         st.success("✅ Agent initialized successfully!")
-                        st.experimental_rerun()
+                        # Request a single guarded rerun instead of unconditional rerun
+                        request_rerun_once()
         
         if st.session_state.initialized:
             st.success("✅ Agent Ready")
@@ -166,12 +190,12 @@ def main():
                 if st.session_state.agent:
                     st.session_state.agent.processed_documents.clear()
                     st.success("All documents cleared!")
-                    st.experimental_rerun()
+                    request_rerun_once()
             
             if st.button("Clear Query History"):
                 st.session_state.query_history.clear()
                 st.success("Query history cleared!")
-                st.experimental_rerun()
+                request_rerun_once()
     
     # Main content area
     if not st.session_state.initialized:
@@ -235,18 +259,19 @@ def main():
                                 ❌ Failed to process {uploaded_file.name}: {str(e)}
                             </div>
                             """, unsafe_allow_html=True)
+                            print("Document processing error:", traceback.format_exc(), file=sys.stderr)
                         
                         finally:
                             # Clean up temporary file
                             try:
                                 os.unlink(file_path)
-                            except:
+                            except Exception:
                                 pass
                     
                     progress_bar.progress((i + 1) / len(uploaded_files))
                 
                 status_text.text("✅ Processing complete!")
-                st.experimental_rerun()
+                request_rerun_once()
     
     with tab2:
         st.markdown('<h2 class="sub-header">💬 Intelligent Q&A Interface</h2>', unsafe_allow_html=True)
@@ -304,14 +329,18 @@ def main():
             if st.button("🚀 Ask Question", type="primary", disabled=not query.strip()):
                 if query.strip():
                     with st.spinner("🤔 Analyzing document and generating response..."):
-                        response = st.session_state.agent.query_document(query, selected_doc)
+                        try:
+                            response = st.session_state.agent.query_document(query, selected_doc)
+                        except Exception as e:
+                            response = f"Error while querying: {e}"
+                            print("Query error:", traceback.format_exc(), file=sys.stderr)
                         
-                        # Store in history
+                        # Store in history (keep it simple and safe)
                         st.session_state.query_history.append({
                             'query': query,
                             'response': response,
                             'document': selected_doc or "All Documents",
-                            'timestamp': st.session_state.agent.security_manager.SecurityManager().rate_limit.__defaults__[0] if hasattr(st.session_state.agent.security_manager, 'SecurityManager') else "N/A"
+                            'timestamp': getattr(st.session_state.agent, "last_query_time", "N/A")
                         })
                         
                         # Display response
@@ -326,7 +355,7 @@ def main():
             if st.button("🗑️ Clear Query"):
                 if hasattr(st.session_state, 'current_query'):
                     del st.session_state.current_query
-                st.experimental_rerun()
+                request_rerun_once()
         
         # Query History
         if st.session_state.query_history:
@@ -372,41 +401,20 @@ def main():
                                     col1, col2 = st.columns([3, 1])
                                     
                                     with col1:
-                                        st.markdown(f"**Authors:** {', '.join(paper['authors'])}")
-                                        st.markdown(f"**Published:** {paper['published']}")
-                                        st.markdown(f"**Categories:** {', '.join(paper['categories'])}")
-                                        st.markdown(f"**Summary:** {paper['summary'][:300]}...")
+                                        st.markdown(f"**Authors:** {', '.join(paper.get('authors', []))}")
+                                        st.markdown(f"**Published:** {paper.get('published', 'N/A')}")
+                                        st.markdown(f"**Categories:** {', '.join(paper.get('categories', []))}")
+                                        st.markdown(f"**Summary:** {paper.get('summary', '')[:300]}...")
                                     
                                     with col2:
-                                        st.markdown(f"[📖 View PDF]({paper['pdf_url']})")
+                                        st.markdown(f"[📖 View PDF]({paper.get('pdf_url', '#')})")
                                         
-                                        # Download & Process button removed as per user request
-                                        # if st.button(f"⬇️ Download & Process", key=f"download_{i}"):
-                                        #     pdf_url = paper.get('pdf_url')
-                                        #     if not pdf_url:
-                                        #         st.error(f"❌ No PDF URL available for this paper")
-                                        #         continue
-                                        #
-                                        #     st.info(f"Debug: Attempting to download from URL: {pdf_url}")
-                                        #     with st.spinner(f"Downloading and processing {paper['title'][:50]}..."):
-                                        #         try:
-                                        #             # Use the download_paper method directly for debugging
-                                        #             file_path = st.session_state.agent.arxiv_integration.download_paper(pdf_url)
-                                        #             if file_path:
-                                        #                 doc_id = st.session_state.agent.ingest_document(file_path)
-                                        #                 st.success(f"✅ Paper downloaded and processed! Document ID: {doc_id}")
-                                        #                 st.experimental_rerun()
-                                        #             else:
-                                        #                 st.error("❌ Failed to download paper - check logs for details")
-                                        #                 st.info("Check the ai_agent.log file for more details on the download failure.")
-                                        #         except Exception as e:
-                                        #             st.error(f"❌ Error: {str(e)}")
-                                        #             logger.error(f"Download button error for paper {i}: {e}")
                         else:
                             st.warning("No papers found for your search query.")
                     
                     except Exception as e:
                         st.error(f"Search failed: {str(e)}")
+                        print("ArXiv search error:", traceback.format_exc(), file=sys.stderr)
     
     with tab4:
         st.markdown('<h2 class="sub-header">📊 Document Management</h2>', unsafe_allow_html=True)
@@ -425,7 +433,11 @@ def main():
             
             with col1:
                 if st.button(f"📄 View Summary", key=f"summary_{doc_id}"):
-                    summary = st.session_state.agent.get_document_summary(doc_id)
+                    try:
+                        summary = st.session_state.agent.get_document_summary(doc_id)
+                    except Exception as e:
+                        summary = f"Error getting summary: {e}"
+                        print("Get summary error:", traceback.format_exc(), file=sys.stderr)
                     st.markdown(f"""
                     <div class="info-box">
                         {summary}
@@ -440,9 +452,12 @@ def main():
             
             with col3:
                 if st.button(f"🗑️ Remove", key=f"remove_{doc_id}"):
-                    del st.session_state.agent.processed_documents[doc_id]
-                    st.success(f"Document {doc_id} removed!")
-                    st.experimental_rerun()
+                    try:
+                        del st.session_state.agent.processed_documents[doc_id]
+                        st.success(f"Document {doc_id} removed!")
+                    except Exception:
+                        print("Remove document error:", traceback.format_exc(), file=sys.stderr)
+                    request_rerun_once()
             
             st.markdown("---")
     
@@ -456,4 +471,18 @@ def main():
     """, unsafe_allow_html=True)
 
 if __name__ == "__main__":
-    main()
+    # Run main() but capture any top-level exceptions and print full traceback
+    try:
+        main()
+    except Exception:
+        tb = traceback.format_exc()
+        print("Unhandled exception in app:\n", tb, file=sys.stderr)
+        # Try to display something helpful in the Streamlit UI as well
+        try:
+            st.error("Unhandled exception (details printed to logs).")
+            st.text(tb)
+            # Prevent an automatic endless rerun by not calling st.experimental_rerun here
+            st.stop()
+        except Exception:
+            # If Streamlit isn't available for any reason, just exit
+            pass
