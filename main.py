@@ -476,7 +476,7 @@ class ArxivIntegration:
 class LLMInterface:
     """Handles LLM API integration with context management and optimization"""
     
-    def __init__(self, api_key: str, model: str = "gemini-1.5-flash"):
+    def __init__(self, api_key: str, model: str = "gemini-2.5-flash"):
         if not GENAI_AVAILABLE:
             raise ImportError("Google Generative AI library is not available. Please install it with: pip install google-generativeai")
 
@@ -820,4 +820,5 @@ class DocumentQAAgent:
 
 if __name__ == "__main__":
     # This would be used for testing
+
     pass
